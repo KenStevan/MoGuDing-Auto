@@ -21,6 +21,17 @@ HEADERS = {
     "accept-encoding": "gzip",
     "host": "api.moguding.net:9000",
 }
+# 支付宝人脸核身登记接口要求的客户端标识
+ALIPAY_VERIFICATION_CLIENT_ID = "428a8310cd442757ae699df5d89vmgh"
+# 各版本工学云 App 实际使用的 Dart/Flutter 运行时指纹，每次运行随机选取一个
+USER_AGENT_POOL = [
+    "Dart/2.17 (dart:io)",
+    "Dart/2.19 (dart:io)",
+    "Dart/3.0 (dart:io)",
+    "Dart/3.3 (dart:io)",
+    "Dart/3.5 (dart:io)",
+    "Dart/3.7 (dart:io)",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +55,8 @@ class ApiClient:
         """
         self.config = config
         self.max_retries = 5  # 控制重新尝试的次数
+        # 每个用户每次运行固定使用一个随机 UA，模拟不同版本客户端，降低指纹特征
+        self.headers = {**HEADERS, "user-agent": random.choice(USER_AGENT_POOL)}
 
     def _post_request(
         self,
@@ -129,7 +142,7 @@ class ApiClient:
             }
             captcha_info = self._post_request(
                 captcha_url,
-                HEADERS,
+                self.headers,
                 request_data,
             )
             slider_data = recognize_blockPuzzle_captcha(
@@ -146,7 +159,7 @@ class ApiClient:
             }
             check_result = self._post_request(
                 check_slider_url,
-                HEADERS,
+                self.headers,
                 check_slider_data,
             )
             if check_result.get("code") != 6111:
@@ -234,10 +247,10 @@ class ApiClient:
             "loginType": "android",
             "uuid": str(uuid.uuid4()).replace("-", ""),
             "device": "android",
-            "version": "5.16.0",
+            "version": "4.8.6",
             "t": aes_encrypt(str(int(time.time() * 1000))),
         }
-        rsp = self._post_request(url, HEADERS, data)
+        rsp = self._post_request(url, self.headers, data)
         user_info = json.loads(aes_decrypt(rsp.get("data", "")))
         self.config.update_config(user_info, "userInfo")
 
@@ -461,7 +474,7 @@ class ApiClient:
         # 每月第一天的第一次打卡返回的是空，所以特殊处理返回空字典
         return rsp.get("data", [{}])[0] if rsp.get("data") else {}
 
-    def submit_clock_in(self, checkin_info: Dict[str, Any]) -> None:
+    def submit_clock_in(self, checkin_info: Dict[str, Any]) -> str:
         """
         提交打卡信息。
 
@@ -469,6 +482,10 @@ class ApiClient:
 
         Args:
             checkin_info (Dict[str, Any]): 包含打卡类型及相关信息的字典。
+
+        Returns:
+            str: 打卡结果状态。"success" 表示打卡成功；
+            "verification_required" 表示服务端要求支付宝人脸核身验证。
 
         Raises:
             ValueError: 如果打卡提交失败，抛出包含详细错误信息的异常。
@@ -478,7 +495,8 @@ class ApiClient:
         planId = self.config.get_value("planInfo.planId")
 
         if self.config.get_value("userInfo.userType") != "teacher":
-            url = "attendence/clock/v5/save"
+            # 2026-10 起服务端下线了 clock/v5/save，旧接口返回"请到应用商店或者工学云网站下载最新版本APP"
+            url = "attendence/clock/v6/save"
             sign_data = [
                 self.config.get_value("config.device"),
                 checkin_info.get("type"),
@@ -489,58 +507,80 @@ class ApiClient:
 
         logger.info(f'打卡类型：{checkin_info.get("type")}')
 
-        data = {
-            "distance": None,
-            "content": None,
-            "lastAddress": None,
-            "lastDetailAddress": checkin_info.get("lastDetailAddress"),
-            "attendanceId": None,
-            "country": "中国",
-            "createBy": None,
-            "createTime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-            "description": checkin_info.get("description", None),
-            "device": self.config.get_value("config.device"),
-            "images": None,
-            "isDeleted": None,
-            "isReplace": None,
-            "modifiedBy": None,
-            "modifiedTime": None,
-            "schoolId": None,
-            "state": "NORMAL",
-            "teacherId": None,
-            "teacherNumber": None,
-            "type": checkin_info.get("type"),
-            "stuId": None,
-            "planId": planId,
-            "attendanceType": None,
-            "username": None,
-            "attachments": checkin_info.get("attachments", None),
-            "userId": self.config.get_value("userInfo.userId"),
-            "isSYN": None,
-            "studentId": None,
-            "applyState": None,
-            "studentNumber": None,
-            "memberNumber": None,
-            "headImg": None,
-            "attendenceTime": None,
-            "depName": None,
-            "majorName": None,
-            "className": None,
-            "logDtoList": None,
-            "isBeyondFence": None,
-            "practiceAddress": None,
-            "tpJobId": None,
-            "t": aes_encrypt(str(int(time.time() * 1000))),
-        }
+        clockin_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        # v6 接口的字段集合，未用到的字段一律置 None
+        keys = [
+            "distance", "content", "lastAddress", "lastDetailAddress", "attendanceId",
+            "country", "createBy", "createTime", "description", "device", "images",
+            "isDeleted", "isReplace", "modifiedBy", "modifiedTime", "schoolId",
+            "state", "teacherId", "teacherNumber", "type", "captcha", "appUuid",
+            "isFirstSignInWeb", "stuId", "planId", "attendanceType", "username",
+            "isBeyondFenceStu", "attachments", "userId", "isSYN", "studentId",
+            "applyState", "studentNumber", "memberNumber", "headImg", "attendenceTime",
+            "depName", "majorName", "className", "logDtoList", "isBeyondFence",
+            "practiceAddress", "tpJobId", "jobAddress", "jobAddrPoint", "certifyId",
+            "outRegisterNo", "t",
+        ]
+        data = dict.fromkeys(keys, None)
+        data.update(
+            {
+                "country": "中国",
+                # v6 接口不再接受旧版的 lastDetailAddress 值，保持 None
+                "createTime": clockin_time,
+                "description": checkin_info.get("description", None),
+                "device": self.config.get_value("config.device"),
+                "state": "NORMAL",
+                "type": checkin_info.get("type"),
+                "planId": planId,
+                "attachments": checkin_info.get("attachments", None),
+                "userId": self.config.get_value("userInfo.userId"),
+                "attendenceTime": clockin_time,
+                "outRegisterNo": checkin_info.get("outRegisterNo", None),
+                "t": aes_encrypt(str(int(time.time() * 1000))),
+            }
+        )
 
         data.update(self.config.get_value("config.clockIn.location"))
 
         headers = self._get_authenticated_headers(sign_data)
 
-        if self._post_request(url, headers, data).get("msg") == "302":
+        rsp = self._post_request(url, headers, data)
+        if rsp.get("msg") == "302":
             logger.info("检测到行为验证码，正在通过···")
             data["captcha"] = self.solve_click_word_captcha()
-            self._post_request(url, headers, data)
+            rsp = self._post_request(url, headers, data)
+
+        if rsp.get("msg") == "304":
+            logger.warning("服务端要求支付宝人脸核身验证")
+            return "verification_required"
+        return "success"
+
+    def create_alipay_verification(self) -> Dict[str, str]:
+        """
+        创建支付宝人脸核身验证登记。
+
+        打卡接口返回 304 后，通过该接口创建核身登记，用户需在手机上打开
+        返回的 registerUrl 链接并本人完成支付宝人脸验证，之后携带
+        outRegisterNo 重新打卡即可通过。
+
+        Returns:
+            Dict[str, str]: 包含 outRegisterNo（登记编号）和 registerUrl（验证链接）的字典。
+
+        Raises:
+            ValueError: 如果创建登记失败或响应不完整，抛出包含详细错误信息的异常。
+        """
+        headers = self._get_authenticated_headers()
+        headers["client_id"] = ALIPAY_VERIFICATION_CLIENT_ID
+        url = "usercenter/alipay/v1/createAxdjk"
+        data = {"t": aes_encrypt(str(int(time.time() * 1000)))}
+        rsp = self._post_request(url, headers, data)
+
+        result = rsp.get("data") or {}
+        out_register_no = str(result.get("outRegisterNo") or "").strip()
+        register_url = str(result.get("registerUrl") or "").strip()
+        if not out_register_no or not register_url:
+            raise ValueError("创建支付宝人脸核身登记失败：响应数据不完整")
+        return {"outRegisterNo": out_register_no, "registerUrl": register_url}
 
     def get_upload_token(self) -> str:
         """
@@ -573,7 +613,7 @@ class ApiClient:
             包含认证信息和签名的请求头字典。
         """
         headers = {
-            **HEADERS,
+            **self.headers,
             "authorization": self.config.get_value("userInfo.token"),
             "userid": self.config.get_value("userInfo.userId"),
             "rolekey": self.config.get_value("userInfo.roleKey"),

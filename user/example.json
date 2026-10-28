@@ -7,12 +7,12 @@
     "clockIn": {
       "mode": "daily",
       "location": {
-        "address": "四川省 · 成都市 · 高新区 · 在科创十一街附近",
-        "latitude": "30.559922",
-        "longitude": "104.093023",
-        "province": "四川省",
-        "city": "成都市",
-        "area": "高新区"
+        "address": "福建省 · 厦门市 · 集美区 · 在厦门理工学院博学楼2-2-1B附近",
+        "latitude": "24.625475",
+        "longitude": "118.086372",
+        "province": "福建省",
+        "city": "厦门市",
+        "area": "集美区"
       },
       "imageCount": 0,
       "description": [

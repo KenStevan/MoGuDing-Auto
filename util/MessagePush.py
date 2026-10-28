@@ -7,8 +7,8 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.header import Header
 from email.utils import formataddr
-
 import requests
+requests.packages.urllib3.disable_warnings()
 
 logger = logging.getLogger(__name__)
 

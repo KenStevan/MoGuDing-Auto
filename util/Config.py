@@ -98,17 +98,23 @@ class ConfigManager:
         """
         更新配置并保存（如果是从文件加载的配置）。
 
+        与 get_value 一致，键名支持用点（.）符号分隔的多级路径。
+
         Args:
             value (Any): 配置的新值。
             keys (str): 配置的键名序列，用点（.）分隔。
         """
         config = self._config
         try:
-            for key in keys[:-1]:
+            # 展开所有点分键名，保留最后一个作为赋值目标
+            path: list[str] = []
+            for key in keys:
+                path.extend(key.split("."))
+            for key in path[:-1]:
                 # 使用 setdefault 确保中间的字典存在
                 config = config.setdefault(key, {})
             # 更新或设置最后一个键名的值
-            config[keys[-1]] = value
+            config[path[-1]] = value
 
             # 如果从文件加载，则保存配置
             if self._path is not None:

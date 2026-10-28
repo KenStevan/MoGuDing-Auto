@@ -1,0 +1,43 @@
+name: "支付宝人脸核身预授权"
+
+# 睡前预授权：创建核身登记并推送验证链接，本人完成人脸验证后，
+# 次日定时打卡（main.yml）遇到 304 时会自动使用验证凭据。
+# 默认仅支持手动触发；如需每晚自动推送，取消下方 cron 注释。
+on:
+  workflow_dispatch: # 手动触发
+  # schedule:
+  #   - cron: "0 14 * * *" # UTC 14:00 / 北京时间 22:00
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+          check-latest: true
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Create alipay verification registration
+        env:
+          USER: ${{ secrets.USER }}
+          TZ: Asia/Shanghai
+        run: |
+          python main.py --alipay-verify

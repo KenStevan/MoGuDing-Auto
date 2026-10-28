@@ -2,7 +2,7 @@ import logging
 from datetime import datetime, timedelta
 
 import requests
-
+requests.packages.urllib3.disable_warnings()
 logger = logging.getLogger(__name__)
 
 

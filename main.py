@@ -110,7 +110,37 @@ def perform_clock_in(api_client: ApiClient, config: ConfigManager) -> Dict[str, 
             "description": description,
         }
 
-        api_client.submit_clock_in(checkin_info)
+        result = api_client.submit_clock_in(checkin_info)
+
+        # 服务端要求支付宝人脸核身：优先使用已保存的核身凭据重试
+        if result == "verification_required":
+            saved_register_no = config.get_value("alipayVerify.outRegisterNo")
+            if saved_register_no:
+                logger.info("使用已保存的支付宝核身凭据重试打卡")
+                # 凭据一经使用即失效，先消费再重试
+                config.update_config(None, "alipayVerify.outRegisterNo")
+                retry_info = {**checkin_info, "outRegisterNo": saved_register_no}
+                result = api_client.submit_clock_in(retry_info)
+
+        # 仍需验证：创建核身登记，推送验证链接，等待用户本人完成后下次运行自动补打
+        if result == "verification_required":
+            registration = api_client.create_alipay_verification()
+            config.update_config(
+                registration["outRegisterNo"], "alipayVerify.outRegisterNo"
+            )
+            message = (
+                f"{display_type}打卡未完成：服务端要求支付宝人脸核身验证。\n\n"
+                "请在手机上点开下面的链接，本人完成支付宝人脸验证（需刷脸，无法代验）：\n"
+                f"{registration['registerUrl']}\n\n"
+                "验证完成后重新运行一次任务，会自动携带核身凭据补上本次打卡。"
+            )
+            logger.error(message)
+            return {
+                "status": "fail",
+                "message": message,
+                "task_type": "打卡",
+            }
+
         logger.info(f"用户 {user_name} {display_type} 打卡成功")
 
         return {
@@ -484,15 +514,16 @@ def run(config: ConfigManager) -> None:
     logger.info(f"执行结束：{desensitize_name(config.get_value('userInfo.nikeName'))}")
 
 
-def execute_tasks(selected_files: Optional[List[str]] = None):
+def _collect_configs(selected_files: Optional[List[str]] = None) -> List[ConfigManager]:
     """
-    创建并执行任务。
+    收集所有待执行的配置（环境变量与 user 目录下的配置文件）。
 
     Args:
         selected_files (Optional[List[str]]): 指定配置文件列表（不含扩展名），默认为 None。
-    """
-    logger.info("开始执行工学云任务")
 
+    Returns:
+        List[ConfigManager]: 配置管理器实例列表。
+    """
     # 获取用户目录下的所有 .json 文件(不含后缀)
     try:
         json_files = [f[:-5] for f in os.listdir(USER_DIR) if f.endswith(".json")]
@@ -520,17 +551,11 @@ def execute_tasks(selected_files: Optional[List[str]] = None):
         logger.error(f"解析环境变量 USER 失败: {e}")
         user_configs = []
 
-    # 检查是否存在有效配置
-    if not json_files and not user_configs:
-        logger.warning("未找到任何有效配置")
-        return
-
-    # 创建任务列表
-    tasks = []
+    configs: List[ConfigManager] = []
 
     def add_task(source, **kwargs):
         try:
-            tasks.append(ConfigManager(**kwargs))
+            configs.append(ConfigManager(**kwargs))
             logger.debug(f"已添加来自 {source} 的任务配置")
         except Exception as err:
             logger.error(f"创建来自 {source} 的任务失败: {err}")
@@ -544,8 +569,70 @@ def execute_tasks(selected_files: Optional[List[str]] = None):
         file_path = os.path.join(USER_DIR, f"{name}.json")
         add_task(f"配置文件 {name}", path=file_path)
 
+    return configs
+
+
+def run_alipay_verify(config: ConfigManager) -> None:
+    """
+    为单个用户创建支付宝人脸核身登记并推送验证链接，不执行打卡等任务。
+    适合睡前运行：本人当场完成人脸验证后，凭据会留待次日定时打卡自动使用。
+    """
+    try:
+        pusher = MessagePusher(config.get_value("config.pushNotifications"))
+    except Exception as e:
+        logger.error(f"获取消息推送客户端失败: {str(e)}")
+        return
+
+    try:
+        api_client = ApiClient(config)
+        # 检查是否登录
+        if not config.get_value("userInfo.token"):
+            api_client.login()
+    except Exception as e:
+        error_message = f"创建支付宝人脸核身登记失败: {str(e)}"
+        logger.error(error_message)
+        pusher.push(
+            [{"status": "fail", "message": error_message, "task_type": "支付宝人脸核身"}]
+        )
+        return
+
+    try:
+        registration = api_client.create_alipay_verification()
+        config.update_config(
+            registration["outRegisterNo"], "alipayVerify.outRegisterNo"
+        )
+        message = (
+            "支付宝人脸核身预授权：请在手机上点开下面的链接，本人完成人脸验证"
+            "（需刷脸，无法代验）：\n"
+            f"{registration['registerUrl']}\n\n"
+            "完成后无需其他操作，下次打卡如被要求核身，会自动使用本次验证凭据。"
+        )
+        logger.info("已创建支付宝人脸核身登记并推送验证链接")
+        pusher.push(
+            [{"status": "fail", "message": message, "task_type": "支付宝人脸核身"}]
+        )
+    except Exception as e:
+        error_message = f"创建支付宝人脸核身登记失败: {str(e)}"
+        logger.error(error_message)
+        pusher.push(
+            [{"status": "fail", "message": error_message, "task_type": "支付宝人脸核身"}]
+        )
+
+
+def execute_tasks(selected_files: Optional[List[str]] = None):
+    """
+    创建并执行任务。
+
+    Args:
+        selected_files (Optional[List[str]]): 指定配置文件列表（不含扩展名），默认为 None。
+    """
+    logger.info("开始执行工学云任务")
+
+    tasks = _collect_configs(selected_files)
+
+    # 检查是否存在有效配置
     if not tasks:
-        logger.error("没有成功创建任何任务")
+        logger.warning("没有找到任何有效配置")
         return
 
     # 执行任务
@@ -561,6 +648,36 @@ def execute_tasks(selected_files: Optional[List[str]] = None):
     logger.info("工学云任务执行结束")
 
 
+def execute_alipay_verify(selected_files: Optional[List[str]] = None):
+    """
+    为所有（或指定的）用户创建支付宝人脸核身登记并推送验证链接。
+
+    Args:
+        selected_files (Optional[List[str]]): 指定配置文件列表（不含扩展名），默认为 None。
+    """
+    logger.info("开始创建支付宝人脸核身登记")
+
+    tasks = _collect_configs(selected_files)
+
+    # 检查是否存在有效配置
+    if not tasks:
+        logger.warning("没有找到任何有效配置")
+        return
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        future_to_task = {
+            executor.submit(run_alipay_verify, task): task for task in tasks
+        }
+        for future in concurrent.futures.as_completed(future_to_task):
+            task = future_to_task[future]
+            try:
+                future.result()
+            except Exception as e:
+                logger.error(f"任务 {task} 处理过程中发生错误: {e}")
+
+    logger.info("支付宝人脸核身登记创建结束")
+
+
 if __name__ == "__main__":
     # 读取命令行参数
     parser = argparse.ArgumentParser(description="运行工学云任务")
@@ -570,7 +687,16 @@ if __name__ == "__main__":
         nargs="+",
         help="指定要执行的配置文件名（不带路径和后缀），可以一次性指定多个",
     )
+    parser.add_argument(
+        "--alipay-verify",
+        action="store_true",
+        help="仅为用户创建支付宝人脸核身登记并推送验证链接（不执行打卡任务），"
+        "适合睡前预授权：本人当场完成人脸验证后，次日定时打卡会自动使用验证凭据",
+    )
     args = parser.parse_args()
 
     # 执行命令
-    execute_tasks(args.file)
+    if args.alipay_verify:
+        execute_alipay_verify(args.file)
+    else:
+        execute_tasks(args.file)
